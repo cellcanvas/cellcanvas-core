@@ -27,6 +27,7 @@ class DataManager:
         labels : Array
             (n,) array of labels for each feature.
         """
+
         features = []
         labels = []
         for dataset in self.datasets:

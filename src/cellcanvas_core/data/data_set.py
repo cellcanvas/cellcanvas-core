@@ -4,10 +4,10 @@ from typing import Dict, List, Union
 
 import numpy as np
 import zarr
-from ome_zarr.io import ZarrLocation
-from ome_zarr.reader import Multiscales
 from zarr import Array
 
+from ome_zarr.io import ZarrLocation
+from ome_zarr.reader import Multiscales
 
 @dataclass
 class DataSet:
@@ -65,7 +65,8 @@ class DataSet:
             )
         else:
             if Multiscales.matches(ZarrLocation(labels_path)):
-                labels = zarr.open(os.path.join(labels_path, "0"), "a")
+                labels = zarr.open(os.path.join(labels_path, "0"),
+                                   "a")
             else:
                 labels = zarr.open(labels_path, "a")
 
@@ -102,40 +103,38 @@ class DataSet:
         todo: add ability to create missing labels/segmentations
         """
         # TODO rewrite this to copy everything to be local
-
+        
         # get the image
         # TODO fix hardcoded scale for pickathon
         image = zarr.open(zarr.storage.LRUStoreCache(image_store, None), "r")["0"]
 
         # get the features
-        features = {
-            "features": zarr.open(zarr.storage.LRUStoreCache(features_store, None), "r")
-        }
+        features = {"features": zarr.open(zarr.storage.LRUStoreCache(features_store, None), "r")}
 
         group_name = "labels"
-
+        
         # get the labels
-        labels = zarr.open_group(
-            zarr.storage.LRUStoreCache(labels_store, None), mode="a"
-        )
+        labels = zarr.open_group(zarr.storage.LRUStoreCache(labels_store, None),
+                                 mode="a")
         if group_name in labels:
             labels = labels[group_name]
         else:
-            labels = labels.create_dataset(group_name, shape=image.shape, dtype="i4")
+            labels = labels.create_dataset(group_name,
+                                           shape=image.shape,
+                                           dtype="i4")
 
         # get the segmentation
-        segmentation = zarr.open_group(
-            zarr.storage.LRUStoreCache(segmentation_store, None), mode="a"
-        )
+        segmentation = zarr.open_group(zarr.storage.LRUStoreCache(segmentation_store, None),
+                                       mode="a")
         if group_name in segmentation:
             segmentation = segmentation[group_name]
         else:
-            segmentation = segmentation.create_dataset(
-                group_name, shape=image.shape, dtype="i4"
-            )
+            segmentation = segmentation.create_dataset(group_name,
+                                                       shape=image.shape,
+                                                       dtype="i4")
 
         # TODO start a background thread that triggers downloads of the zarrs
-
+            
         return cls(
             image=image,
             features=features,
