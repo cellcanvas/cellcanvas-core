@@ -2,8 +2,9 @@ import logging
 import sys
 from typing import Protocol
 
-from cellcanvas.data.data_manager import DataManager
 from sklearn.exceptions import NotFittedError
+
+from cellcanvas_core.data.data_manager import DataManager
 
 
 class SegmentationModel(Protocol):
@@ -72,4 +73,3 @@ class SemanticSegmentationManager:
             ) from None
 
         return predicted_labels.reshape(feature_image.shape[1:])
-

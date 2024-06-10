@@ -1,9 +1,9 @@
 from typing import List, Optional, Tuple
 
 import dask.array as da
-from cellcanvas.data.data_set import DataSet
-from napari.utils.events.containers import SelectableEventedList
 from zarr import Array
+
+from cellcanvas_core.data.data_set import DataSet
 
 
 class DataManager:
@@ -12,7 +12,8 @@ class DataManager:
             datasets = []
         elif isinstance(datasets, DataSet):
             datasets = [datasets]
-        self.datasets = SelectableEventedList(datasets)
+        # TODO this used to be a napari SelectableEventedList
+        self.datasets = list(datasets)
 
     # Normal version
     def get_training_data(self) -> Tuple[Array, Array]:
