@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Union
 
 import numpy as np
+import dask.array as da
 import zarr
 from zarr import Array
 
@@ -17,14 +18,33 @@ class DataSet:
     features: Dict[str, Array]
     labels: Array
     segmentation: Array
+    feature_axis: int = 0
+
+    def __post_init__(self):
+        if not self.features:
+            raise ValueError("At least one feature array is required")
+        for name, values in self.features.items():
+            if values.ndim != self.image.ndim + 1:
+                raise ValueError(f"Feature {name} needs one channel axis and the image spatial axes")
+            axis = self.feature_axis % values.ndim
+            if not -values.ndim <= self.feature_axis < values.ndim:
+                raise ValueError("feature_axis is outside the feature array")
+            spatial = values.shape[:axis] + values.shape[axis + 1:]
+            if spatial != self.image.shape or values.shape[axis] == 0:
+                raise ValueError(f"Feature {name} does not match the image shape")
+        if self.labels.shape != self.image.shape or self.segmentation.shape != self.image.shape:
+            raise ValueError("Labels and segmentation must match the image shape")
 
     @property
-    def concatenated_features(self) -> np.ndarray:
-        """Return all of the features concatenated into a single array."""
-        features_list = list(self.features.values())
-        if len(features_list) == 1:
-            return features_list[0]
-        return np.concatenate(features_list, axis=-1)
+    def concatenated_features(self) -> da.Array:
+        """Return lazy channel-first features in dictionary insertion order.
+
+        Set feature_axis=-1 for prototype arrays with channels last. Reading
+        this property builds a task graph without loading the whole volume.
+        """
+        features = [da.moveaxis(da.asarray(value), self.feature_axis, 0)
+                    for value in self.features.values()]
+        return da.concatenate(features, axis=0)
 
     def __hash__(self):
         """Simple hash function, should updated in the future.
