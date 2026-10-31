@@ -11,13 +11,13 @@ from cellcanvas_core.data.data_set import DataSet
 from cellcanvas_core.semantic.segmentation_manager import SemanticSegmentationManager
 
 
-def make_image(path):
-    group = zarr.open_group(str(path), mode="w")
+def make_image(path, zarr_format=3):
+    group = zarr.open_group(str(path), mode="w", zarr_format=zarr_format)
     image = np.arange(48).reshape(2, 1, 4, 6)
-    group.create_dataset("fine/image", data=image)
-    group.create_dataset("coarse/image", data=image[:, :, ::2, ::2])
-    group.attrs["multiscales"] = [{
-        "version": "0.4",
+    options = {"dimension_names": ("c", "z", "y", "x")} if zarr_format == 3 else {}
+    group.create_array("fine/image", data=image, **options)
+    group.create_array("coarse/image", data=image[:, :, ::2, ::2], **options)
+    multiscales = [{
         "axes": [{"name": "c", "type": "channel"}] + [
             {"name": axis, "type": "space", "unit": "micrometer"}
             for axis in ("z", "y", "x")
@@ -31,13 +31,19 @@ def make_image(path):
                                 ("coarse/image", [1, 3, 1, 1])]
         ],
     }]
+    if zarr_format == 3:
+        group.attrs["ome"] = {"version": "0.5", "multiscales": multiscales}
+    else:
+        multiscales[0]["version"] = "0.4"
+        group.attrs["multiscales"] = multiscales
     return group
 
 
 @pytest.mark.parametrize("backend", ["paths", "stores"])
 @pytest.mark.parametrize("level", [0, 1])
-def test_ngff_train_predict_save_reopen(tmp_path, backend, level):
-    group = make_image(tmp_path / "image")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_ngff_train_predict_save_reopen(tmp_path, backend, level, zarr_format):
+    group = make_image(tmp_path / "image", zarr_format=zarr_format)
     original_metadata = deepcopy(group.attrs.asdict())
     image_path = ["fine/image", "coarse/image"][level]
     expected = group[image_path][:]
@@ -45,7 +51,7 @@ def test_ngff_train_predict_save_reopen(tmp_path, backend, level):
     indices = np.arange(np.prod(shape)).reshape(shape)
     features = np.stack([indices, indices % 2])
     feature_path = str(tmp_path / "features")
-    zarr.save_array(feature_path, features)
+    zarr.save_array(feature_path, features, zarr_format=zarr_format)
     labels_path = str(tmp_path / "labels")
     predictions_path = str(tmp_path / "predictions")
 
@@ -56,8 +62,8 @@ def test_ngff_train_predict_save_reopen(tmp_path, backend, level):
                 predictions_path, make_missing_datasets=True, image_level=level,
             )
         return DataSet.from_stores(
-            group.store, zarr.DirectoryStore(feature_path),
-            zarr.DirectoryStore(labels_path), zarr.DirectoryStore(predictions_path),
+            group.store, zarr.storage.LocalStore(feature_path),
+            zarr.storage.LocalStore(labels_path), zarr.storage.LocalStore(predictions_path),
             image_level=level,
         )
 
@@ -65,6 +71,8 @@ def test_ngff_train_predict_save_reopen(tmp_path, backend, level):
     np.testing.assert_array_equal(dataset.image[:], expected)
     assert dataset.labels.shape == shape
     assert dataset.image_metadata == original_metadata
+    assert dataset.labels.metadata.zarr_format == 3
+    assert dataset.segmentation.metadata.zarr_format == 3
     dataset.labels[:] = indices % 2 + 1
     manager = SemanticSegmentationManager(
         DataManager([dataset]), DecisionTreeClassifier(random_state=0)
@@ -77,8 +85,11 @@ def test_ngff_train_predict_save_reopen(tmp_path, backend, level):
     assert reopened.image_metadata == original_metadata
     assert group.attrs.asdict() == original_metadata
     np.testing.assert_array_equal(group[image_path][:], expected)
-    dataset.image_metadata["multiscales"][0]["axes"][1]["unit"] = "nanometer"
+    metadata = dataset.image_metadata.get("ome", dataset.image_metadata)
+    metadata["multiscales"][0]["axes"][1]["unit"] = "nanometer"
     assert group.attrs.asdict() == original_metadata
+    assert group.metadata.zarr_format == zarr_format
+    assert group[image_path].metadata.zarr_format == zarr_format
 
 
 @pytest.mark.parametrize("axes", [
@@ -86,9 +97,9 @@ def test_ngff_train_predict_save_reopen(tmp_path, backend, level):
 ])
 def test_wrong_axes_fail_before_creating_annotations(tmp_path, axes):
     group = make_image(tmp_path / "image")
-    metadata = group.attrs["multiscales"]
-    metadata[0]["axes"] = [{"name": name} for name in axes]
-    group.attrs["multiscales"] = metadata
+    metadata = group.attrs["ome"]
+    metadata["multiscales"][0]["axes"] = [{"name": name} for name in axes]
+    group.attrs["ome"] = metadata
     with pytest.raises(ValueError, match="axes must be ordered"):
         DataSet.from_paths(str(tmp_path / "image"), "unused", str(tmp_path / "labels"),
                            str(tmp_path / "predictions"), make_missing_datasets=True)
@@ -105,7 +116,17 @@ def test_invalid_level(tmp_path, level):
 
 def test_missing_ngff_array_does_not_fall_back_to_zero(tmp_path):
     group = make_image(tmp_path / "image")
-    group.create_dataset("0", data=np.zeros((2, 1, 4, 6)))
+    group.create_array("0", data=np.zeros((2, 1, 4, 6)))
     del group["fine/image"]
     with pytest.raises(ValueError, match="dataset is missing"):
+        open_image(group.store)
+
+
+@pytest.mark.parametrize("dimension_names", [None, ("c", "z", "x", "y")])
+def test_ngff_dimension_names_must_match_axes(tmp_path, dimension_names):
+    group = make_image(tmp_path / "image")
+    values = group["fine/image"][:]
+    del group["fine/image"]
+    group.create_array("fine/image", data=values, dimension_names=dimension_names)
+    with pytest.raises(ValueError, match="dimension_names"):
         open_image(group.store)
