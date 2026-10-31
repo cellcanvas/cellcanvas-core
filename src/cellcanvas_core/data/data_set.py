@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Union
 
 import numpy as np
@@ -9,6 +9,8 @@ from zarr import Array
 
 from ome_zarr.io import ZarrLocation
 from ome_zarr.reader import Multiscales
+
+from cellcanvas_core.data._image import open_image
 
 @dataclass
 class DataSet:
@@ -24,6 +26,7 @@ class DataSet:
     labels: Array
     segmentation: Array
     feature_axis: int = 0
+    image_metadata: Dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.image.ndim != 4 or any(size == 0 for size in self.image.shape):
@@ -70,15 +73,14 @@ class DataSet:
         segmentation_path: str,
         make_missing_datasets: bool = False,
         feature_axis: int = 0,
+        image_level: int = 0,
     ):
         """Create a DataSet from a set of paths.
 
         todo: add ability to create missing labels/segmentations
         """
         # get the image
-        image = zarr.open(image_path, "r")
-        if image.ndim != 4 or any(size == 0 for size in image.shape):
-            raise ValueError("Images must have nonempty (C, Z, Y, X) axes")
+        image, image_metadata = open_image(image_path, level=image_level)
 
         # get the features
         if isinstance(features_path, str):
@@ -120,6 +122,7 @@ class DataSet:
             labels=labels,
             segmentation=segmentation,
             feature_axis=feature_axis,
+            image_metadata=image_metadata,
         )
 
     @classmethod
@@ -130,6 +133,7 @@ class DataSet:
         labels_store,
         segmentation_store,
         feature_axis: int = 0,
+        image_level: int = 0,
     ):
         """Create a DataSet from a set of paths.
 
@@ -138,10 +142,9 @@ class DataSet:
         # TODO rewrite this to copy everything to be local
         
         # get the image
-        # TODO fix hardcoded scale for pickathon
-        image = zarr.open(zarr.storage.LRUStoreCache(image_store, None), "r")["0"]
-        if image.ndim != 4 or any(size == 0 for size in image.shape):
-            raise ValueError("Images must have nonempty (C, Z, Y, X) axes")
+        image, image_metadata = open_image(
+            zarr.storage.LRUStoreCache(image_store, None), level=image_level
+        )
 
         # get the features
         features = {"features": zarr.open(zarr.storage.LRUStoreCache(features_store, None), "r")}
@@ -176,4 +179,5 @@ class DataSet:
             labels=labels,
             segmentation=segmentation,
             feature_axis=feature_axis,
+            image_metadata=image_metadata,
         )
