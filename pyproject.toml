@@ -37,8 +37,8 @@ classifiers = [
 # add your package dependencies here
 dependencies = [
     "numpy<2.0",
-    "zarr",
-    "ome-zarr",
+    "zarr>=2.16,<3",
+    "ome-zarr>=0.8,<0.12",
     "dask",
     "scikit-learn",
     "tqdm"
