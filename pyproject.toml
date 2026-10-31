@@ -110,7 +110,7 @@ skip-magic-trailing-comma = false  # default is false
 # https://docs.pytest.org/
 [tool.pytest.ini_options]
 minversion = "7.0"
-testpaths = ["tests"]
+testpaths = ["tests", "src/cellcanvas_core"]
 filterwarnings = ["error"]
 
 # https://coverage.readthedocs.io/

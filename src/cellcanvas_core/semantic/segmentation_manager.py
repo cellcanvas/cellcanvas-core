@@ -7,7 +7,7 @@ import dask.array as da
 from dask import delayed
 from sklearn.exceptions import NotFittedError
 
-from cellcanvas.data.data_manager import DataManager
+from cellcanvas_core.data.data_manager import DataManager
 from tqdm import tqdm
 
 class SegmentationModel(Protocol):
