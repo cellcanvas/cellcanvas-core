@@ -17,7 +17,8 @@ def make_dataset(axis=0):
         features = {key: np.moveaxis(value, 0, -1) for key, value in features.items()}
     labels = (image % 2 + 1).astype("i4")
     labels.flat[0] = 0
-    return DataSet(image, features, labels, np.zeros_like(labels), feature_axis=axis)
+    return DataSet(np.stack([image, image + 1000]), features,
+                   labels, np.zeros_like(labels), feature_axis=axis)
 
 
 @pytest.mark.parametrize("axis", [0, -1])
@@ -44,6 +45,17 @@ def test_no_painted_labels_has_a_useful_error():
     dataset.labels[:] = 0
     with pytest.raises(ValueError, match="Paint"):
         DataManager([dataset]).get_training_data()
+
+
+def test_image_axes_and_single_slice_2d():
+    image = np.zeros((2, 1, 3, 4))
+    labels = np.zeros((1, 3, 4), dtype="i4")
+    dataset = DataSet(image, {"features": np.ones((5, 1, 3, 4))}, labels, labels.copy())
+    assert dataset.image.shape == (2, 1, 3, 4)
+    assert dataset.labels.shape == (1, 3, 4)
+    assert dataset.image[np.newaxis].shape == (1, 2, 1, 3, 4)
+    with pytest.raises(ValueError, match="C, Z, Y, X"):
+        DataSet(image[0], dataset.features, labels, labels.copy())
 
 
 def test_train_predict_save_reopen_with_bounded_batches(tmp_path):
