@@ -54,6 +54,20 @@ jobs:
       - name: Coverage
         uses: codecov/codecov-action@v4
 
+  napari:
+    name: napari layers
+    runs-on: ubuntu-latest
+    env:
+      QT_API: pyside6
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install '.[test,napari]'
+      - run: python -m pytest -q tests/test_napari.py
+
   deploy:
     name: Deploy
     needs: test
