@@ -141,14 +141,30 @@ class SemanticSegmentationManager:
         rows = feature_image.transpose(1, 2, 3, 0).reshape(-1, c)
         return rows, feature_image.shape[1:]
 
-    def predict_to_segmentation(self, dataset: DataSet, batch_size=65536):
+    def predict_to_segmentation(self, dataset: DataSet, batch_size=65536, region=None):
         """Write positive class labels to the dataset in spatial blocks.
 
-        Model calls contain at most batch_size voxels. Memory includes the
-        feature block, its source chunks and one block of predictions; no
-        complete prediction volume is allocated. Model classes start at zero
-        and are shifted by one for storage. Existing painting labels are left
-        intact. A failure can leave already written blocks in place.
+        Model calls contain at most batch_size voxels. Each block's features
+        are read directly from the feature sources (`DataSet.read_features`),
+        so memory is one block of features and predictions; no complete
+        feature or prediction volume is allocated. Model classes start at
+        zero and are shifted by one for storage. Existing painting labels are
+        left intact. A failure can leave already written blocks in place.
+
+        Parameters
+        ----------
+        dataset : DataSet
+        batch_size : int
+            Maximum voxels per block and model call.
+        region : tuple of three slices, optional
+            (Z, Y, X) region to predict, for example one slice
+            ``(slice(z, z + 1), slice(None), slice(None))``; the whole
+            volume by default. Voxels outside it are not written.
+
+        Returns
+        -------
+        region : tuple of slice
+            The (Z, Y, X) region written, with explicit bounds.
         """
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
@@ -156,20 +172,21 @@ class SemanticSegmentationManager:
         dtype = np.dtype(target.dtype)
         if dtype.kind not in "iu":
             raise ValueError("Segmentation storage must use an integer dtype")
-        features = dataset.concatenated_features
-        if features.shape[1:] != target.shape:
+        if dataset.image.shape[1:] != tuple(target.shape):
             raise ValueError("Feature spatial axes must match segmentation storage")
-        z, y, x = target.shape
+        bounds = _region_bounds(region, target.shape)
+        (z0, z1), (y0, y1), (x0, x1) = bounds
+        z, y, x = z1 - z0, y1 - y0, x1 - x0
         block_x = min(x, batch_size)
         block_y = min(y, max(1, batch_size // block_x))
         block_z = min(z, max(1, batch_size // (block_x * block_y)))
         for start_z, start_y, start_x in product(
-            range(0, z, block_z), range(0, y, block_y), range(0, x, block_x)
+            range(z0, z1, block_z), range(y0, y1, block_y), range(x0, x1, block_x)
         ):
-            region = (slice(start_z, min(z, start_z + block_z)),
-                      slice(start_y, min(y, start_y + block_y)),
-                      slice(start_x, min(x, start_x + block_x)))
-            block = features[(slice(None),) + region].compute()
+            block_region = (slice(start_z, min(z1, start_z + block_z)),
+                            slice(start_y, min(y1, start_y + block_y)),
+                            slice(start_x, min(x1, start_x + block_x)))
+            block = dataset.read_features(block_region)
             rows = np.moveaxis(block, 0, -1).reshape(-1, block.shape[0])
             classes = np.asarray(self.model.predict(rows))
             if classes.shape != (len(rows),):
@@ -179,4 +196,24 @@ class SemanticSegmentationManager:
             if np.any(classes > np.iinfo(dtype).max - 1):
                 raise ValueError("Model classes do not fit in segmentation storage after adding one")
             stored = classes.astype(dtype) + 1
-            target[region] = stored.reshape(block.shape[1:])
+            target[block_region] = stored.reshape(block.shape[1:])
+        return tuple(slice(a, b) for a, b in bounds)
+
+
+def _region_bounds(region, shape):
+    """((start, stop), ...) of a (Z, Y, X) region of unit-step slices, checked against shape."""
+    if region is None:
+        return tuple((0, n) for n in shape)
+    region = tuple(region)
+    if len(region) != 3 or not all(isinstance(r, slice) for r in region):
+        raise ValueError("region must be three slices (Z, Y, X)")
+    bounds = []
+    for r, n in zip(region, shape, strict=True):
+        if r.step not in (None, 1):
+            raise ValueError("region slices must have unit step")
+        start = 0 if r.start is None else r.start
+        stop = n if r.stop is None else r.stop
+        if isinstance(start, bool) or isinstance(stop, bool) or not 0 <= start < stop <= n:
+            raise ValueError(f"region {r} is empty or outside an axis of size {n}")
+        bounds.append((int(start), int(stop)))
+    return tuple(bounds)
