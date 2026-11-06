@@ -7,7 +7,17 @@ import zarr
 from cellcanvas_core.data._geometry import spatial_transform
 
 
-def open_image(source, level=0, axes=("c", "z", "y", "x"), mode="r"):
+def _store_options(source, storage_options):
+    """Keyword arguments that pass fsspec storage options to Zarr for a URL source.
+
+    Local paths and store objects take no storage options; Zarr refuses them.
+    """
+    if storage_options and isinstance(source, str) and "://" in source:
+        return {"storage_options": dict(storage_options)}
+    return {}
+
+
+def open_image(source, level=0, axes=("c", "z", "y", "x"), mode="r", storage_options=None):
     """Return a CZYX array and a copy of its source metadata.
 
     NGFF 0.5 and legacy 0.4 groups use ordered dataset paths from metadata.
@@ -16,7 +26,7 @@ def open_image(source, level=0, axes=("c", "z", "y", "x"), mode="r"):
     """
     if not isinstance(level, int) or isinstance(level, bool) or level < 0:
         raise ValueError("image_level must be a nonnegative integer")
-    root = zarr.open(source, mode=mode)
+    root = zarr.open(source, mode=mode, **_store_options(source, storage_options))
     metadata = deepcopy(root.attrs.asdict())
     require_dimension_names = False
     if isinstance(root, zarr.Array):
