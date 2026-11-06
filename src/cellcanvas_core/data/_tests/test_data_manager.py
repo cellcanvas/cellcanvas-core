@@ -1,8 +1,7 @@
 import unittest
-from unittest.mock import create_autospec
 
-import dask.array as da
 import numpy as np
+import zarr
 
 from cellcanvas_core.data.data_manager import DataManager
 from cellcanvas_core.data.data_set import DataSet
@@ -10,18 +9,11 @@ from cellcanvas_core.data.data_set import DataSet
 
 class TestDataManager(unittest.TestCase):
     def setUp(self):
-        # Create a mock DataSet
-        self.dataset_mock = create_autospec(DataSet)
-
-        # Create fake data for the dataset
-        self.concatenated_features = np.random.rand(3, 10, 10, 2)  # (c, h, w, d)
-        self.labels = np.random.randint(0, 3, (10, 10, 2))  # (h, w, d), with some zeros
-
-        # Assign the fake data to the mock
-        self.dataset_mock.concatenated_features = da.from_array(
-            self.concatenated_features
-        )
-        self.dataset_mock.labels = da.from_array(self.labels)
+        rng = np.random.default_rng(0)
+        self.concatenated_features = rng.random((3, 10, 10, 2))  # (c, z, y, x)
+        self.labels = rng.integers(0, 3, (10, 10, 2))  # (z, y, x), with some zeros
+        self.dataset_mock = DataSet(np.zeros((1, 10, 10, 2)), {"features": self.concatenated_features},
+                                    self.labels, np.zeros((10, 10, 2), dtype="i4"))
 
     def test_initialization_no_datasets(self):
         manager = DataManager()
@@ -56,6 +48,29 @@ class TestDataManager(unittest.TestCase):
 
         np.testing.assert_array_almost_equal(features, expected_features)
         np.testing.assert_array_equal(labels, expected_labels)
+
+    def test_training_reads_only_chunks_with_painting(self):
+        """Zarr features are read in painted storage chunks only, with the same rows."""
+        features = zarr.create_array(store={}, shape=(3, 10, 10, 2), chunks=(3, 1, 5, 2), dtype="f8")
+        features[:] = self.concatenated_features
+        reads = []
+
+        class Recording:
+            shape, dtype, chunks, ndim = features.shape, features.dtype, features.chunks, 4
+
+            def __getitem__(self, key):
+                reads.append(key)
+                return features[key]
+
+        labels = np.zeros((10, 10, 2), "i4")
+        labels[3, 1, 0], labels[3, 2, 1], labels[7, 9, 1] = 1, 2, 1
+        dataset = DataSet(np.zeros((1, 10, 10, 2)), {"features": Recording()}, labels,
+                          np.zeros_like(labels))
+        rows, classes = (a.compute() for a in DataManager([dataset]).get_training_data())
+        np.testing.assert_array_equal(rows, self.concatenated_features[:, [3, 3, 7], [1, 2, 9], [0, 1, 1]].T)
+        np.testing.assert_array_equal(classes, [0, 1, 0])
+        assert len(reads) == 2  # two chunks hold painting, of 20
+        assert all(k[1].stop - k[1].start == 1 for k in reads)
 
 
 if __name__ == "__main__":

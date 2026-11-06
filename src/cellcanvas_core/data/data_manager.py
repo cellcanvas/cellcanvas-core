@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple
 
 import dask.array as da
+import numpy as np
 from zarr import Array
 
 from cellcanvas_core.data.data_set import DataSet
@@ -15,9 +16,13 @@ class DataManager:
         # TODO this used to be a napari SelectableEventedList
         self.datasets = list(datasets)
 
-    # Normal version
     def get_training_data(self) -> Tuple[Array, Array]:
         """Get the pixel-wise semantic segmentation training data for datasets.
+
+        Only painted voxels are read: labels in bounded Z slabs, then the
+        feature rows at those voxels (see `DataSet.feature_rows`), so the
+        cost follows the painting, not the volume. Rows are in flat C order
+        of each dataset's voxels, datasets in order.
 
         Returns
         -------
@@ -33,32 +38,12 @@ class DataManager:
         if not self.datasets:
             raise ValueError("At least one dataset is required for training")
         for dataset in self.datasets:
-            dataset_features = da.asarray(dataset.concatenated_features)
-            dataset_labels = da.asarray(dataset.labels)
-            # Flatten labels for boolean indexing
-            flattened_labels = dataset_labels.flatten()
-
-            # Compute valid_indices based on labels > 0
-            valid_indices = da.nonzero(flattened_labels > 0)[0].compute()
-            if len(valid_indices) == 0:
+            indices, values = dataset.painted_voxels()
+            if len(indices) == 0:
                 continue
-
-            # Flatten only the spatial dimensions of the dataset_features while preserving the feature dimension
-            c, h, w, d = dataset_features.shape
-            reshaped_features = dataset_features.reshape(c, h * w * d)
-
-            # We need to apply valid_indices for each feature dimension separately
-            filtered_features_list = [
-                da.take(reshaped_features[i, :], valid_indices, axis=0)
-                for i in range(c)
-            ]
-            filtered_features = da.stack(filtered_features_list, axis=1)
-
-            # Adjust labels
-            filtered_labels = flattened_labels[valid_indices] - 1
-
-            features.append(filtered_features)
-            labels.append(filtered_labels)
+            rows = dataset.feature_rows(*np.unravel_index(indices, dataset.labels.shape))
+            features.append(da.from_array(rows, chunks=rows.shape))
+            labels.append(da.from_array(values - 1, chunks=values.shape))
 
         if not features:
             raise ValueError("Paint at least one positive label before training")

@@ -2,23 +2,50 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 
 import dask.array as da
+import numpy as np
 import zarr
 from zarr import Array
 
 from cellcanvas_core.data._image import _store_options, open_image
 from cellcanvas_core.data._geometry import SpatialTransform, spatial_transform, validate_alignment
+from cellcanvas_core.data.patch_grid import PatchGridFeatures, is_patch_grid
 
 
 def _lazy(value):
-    """A dask array over value, with a Zarr array's own storage chunks.
+    """A dask array over value, with the source's own chunks.
 
     da.asarray would rechunk a Zarr array to dask's chunk-size limit (128 MiB
     by default), and blocks that cut across storage chunks decode each storage
-    chunk many times.
+    chunk many times. Patch-grid features keep their (D, 1, rows, X) chunks
+    rather than auto chunks that span many slices.
     """
     if isinstance(value, Array):
         return da.from_zarr(value)
+    if isinstance(value, PatchGridFeatures):
+        return da.from_array(value, chunks=value.chunks, meta=np.empty((0,) * 4, value.dtype))
     return da.asarray(value)
+
+
+def _open_features(path, storage_options=None, mode="r"):
+    """A feature array: stored per voxel, or a patch-token grid read lazily."""
+    array = zarr.open_array(path, mode=mode, **_store_options(path, storage_options))
+    return PatchGridFeatures.from_zarr(array) if is_patch_grid(array) else array
+
+
+def _spatial_chunks(array, axis):
+    """Spatial (Z, Y, X) chunk edges of a feature source, or None if unknown."""
+    chunks = getattr(array, "chunks", None)
+    if chunks is None or isinstance(array, np.ndarray):
+        return None
+    chunks = list(chunks)
+    del chunks[axis]
+    edges = []
+    for size, chunk in zip([n for i, n in enumerate(array.shape) if i != axis], chunks, strict=True):
+        if isinstance(chunk, (int, np.integer)):
+            edges.append(np.arange(0, size, int(chunk)))
+        else:  # dask: block sizes
+            edges.append(np.cumsum((0, *chunk))[:-1])
+    return edges
 
 
 def _open_annotations(path, shape, create, level, expected, grouped=False, storage_options=None):
@@ -86,6 +113,8 @@ class DataSet:
             axis = self.feature_axis % values.ndim
             if not -values.ndim <= self.feature_axis < values.ndim:
                 raise ValueError("feature_axis is outside the feature array")
+            if isinstance(values, PatchGridFeatures) and axis != 0:
+                raise ValueError(f"Patch-grid feature {name} is channel-first; use feature_axis=0")
             spatial = values.shape[:axis] + values.shape[axis + 1:]
             if spatial != spatial_shape or values.shape[axis] == 0:
                 raise ValueError(f"Feature {name} does not match the image shape")
@@ -109,6 +138,84 @@ class DataSet:
         features = [da.moveaxis(_lazy(value), self.feature_axis, 0)
                     for value in self.features.values()]
         return da.concatenate(features, axis=0)
+
+    @property
+    def feature_dtype(self):
+        """dtype of concatenated feature rows."""
+        return np.result_type(*(np.dtype(values.dtype) for values in self.features.values()))
+
+    def read_features(self, region):
+        """(D, z, y, x) NumPy features of one (Z, Y, X) region of slices.
+
+        Each source is read directly in that region: a Zarr array decodes only
+        the storage chunks the region touches, a patch grid interpolates only
+        the region, so memory follows the region size, not the volume.
+        """
+        region = tuple(region)
+        if len(region) != 3 or not all(isinstance(r, slice) for r in region):
+            raise ValueError("region must be three slices (Z, Y, X)")
+        blocks = []
+        for values in self.features.values():
+            axis = self.feature_axis % values.ndim
+            key = region[:axis] + (slice(None),) + region[axis:]
+            blocks.append(np.moveaxis(np.asarray(values[key]), axis, 0))
+        return np.concatenate(blocks, axis=0, dtype=self.feature_dtype)
+
+    def feature_rows(self, z, y, x):
+        """(n, D) NumPy feature rows at integer voxel coordinates.
+
+        Patch grids interpolate only those voxels. Other sources are read in
+        the bounding box of the voxels inside each of their storage chunks (or
+        each Z slice if their chunks are unknown), so sparse painting in a
+        large volume reads little of it.
+        """
+        z, y, x = (np.asarray(v, dtype=np.int64).reshape(-1) for v in (z, y, x))
+        columns = []
+        for values in self.features.values():
+            axis = self.feature_axis % values.ndim
+            channels = values.shape[axis]
+            if hasattr(values, "sample") and axis == 0:
+                columns.append(np.asarray(values.sample(z, y, x)))
+                continue
+            if isinstance(values, np.ndarray):
+                columns.append(np.moveaxis(values, axis, 0)[:, z, y, x].T)
+                continue
+            rows = np.empty((len(z), channels), np.dtype(values.dtype))
+            edges = _spatial_chunks(values, axis) or [np.arange(values.shape[1 if axis == 0 else 0]), [0], [0]]
+            block = np.stack([np.searchsorted(e, c, side="right") - 1
+                              for e, c in zip(edges, (z, y, x), strict=True)], axis=1)
+            _, group = np.unique(block, axis=0, return_inverse=True)
+            for g in range(group.max() + 1 if len(group) else 0):
+                m = np.flatnonzero(group.reshape(-1) == g)
+                low = [int(c[m].min()) for c in (z, y, x)]
+                high = [int(c[m].max()) + 1 for c in (z, y, x)]
+                region = tuple(slice(a, b) for a, b in zip(low, high, strict=True))
+                key = region[:axis] + (slice(None),) + region[axis:]
+                box = np.moveaxis(np.asarray(values[key]), axis, 0)
+                rows[m] = box[:, z[m] - low[0], y[m] - low[1], x[m] - low[2]].T
+            columns.append(rows)
+        return np.concatenate(columns, axis=1, dtype=self.feature_dtype)
+
+    def painted_voxels(self, max_voxels=1 << 24):
+        """Flat C-order indices and values of the painted (nonzero) labels.
+
+        Labels are read in Z slabs of at most about ``max_voxels`` voxels
+        (whole storage chunks in Z when they fit), so the label volume is
+        never loaded whole.
+        """
+        labels = self.labels
+        z, y, x = labels.shape
+        slab = max(1, max_voxels // (y * x))
+        chunks = getattr(labels, "chunks", None)
+        if chunks is not None and isinstance(chunks[0], (int, np.integer)) and chunks[0] <= slab:
+            slab = slab // int(chunks[0]) * int(chunks[0])
+        indices, values = [], []
+        for start in range(0, z, slab):
+            block = np.asarray(labels[start:start + slab])
+            flat = np.flatnonzero(block)
+            indices.append(flat + start * y * x)
+            values.append(block.reshape(-1)[flat])
+        return np.concatenate(indices), np.concatenate(values)
 
     def __hash__(self):
         """Simple hash function, should updated in the future.
@@ -146,8 +253,8 @@ class DataSet:
         # get the features
         if isinstance(features_path, str):
             features_path = [features_path]
-        features = {path: zarr.open_array(path, mode="r", **_store_options(path, storage_options))
-                    for path in features_path}
+        # A Zarr array with cellcanvas_patch_grid metadata is a token grid read lazily per voxel.
+        features = {path: _open_features(path, storage_options) for path in features_path}
 
         # get the labels
         labels = _open_annotations(
@@ -192,7 +299,7 @@ class DataSet:
         geometry = spatial_transform(image_metadata, image_level)
 
         # get the features
-        features = {"features": zarr.open_array(features_store, mode="r")}
+        features = {"features": _open_features(features_store)}
 
         # get the labels
         labels = _open_annotations(labels_store, image.shape[1:], True, image_level,
