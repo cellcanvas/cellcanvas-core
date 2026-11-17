@@ -85,3 +85,47 @@ def test_missing_annotations_require_explicit_creation(tmp_path):
         DataSet.from_paths(image, features, str(tmp_path / "labels"),
                            str(tmp_path / "predictions"))
     assert not (tmp_path / "labels").exists()
+
+
+@pytest.fixture
+def remote_root(tmp_path):
+    """A URL root on an in-memory fsspec filesystem that Zarr opens as a remote store."""
+    fsspec = pytest.importorskip("fsspec")
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    class RemoteMemory(MemoryFileSystem):
+        protocol = ("cellcanvastest",)
+        store = {}
+        pseudo_dirs = [""]
+
+    fsspec.register_implementation("cellcanvastest", RemoteMemory, clobber=True)
+    return f"cellcanvastest://{tmp_path.name}"
+
+
+def test_url_paths_open_with_storage_options(remote_root):
+    root = remote_root
+    options = {"cellcanvas_test_option": "kept"}
+    image = np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4)
+    zarr.save_array(f"{root}/image", image, zarr_format=3, storage_options=options)
+    zarr.save_array(f"{root}/features", image * 2, zarr_format=3, storage_options=options)
+    paths = [f"{root}/{name}" for name in ("image", "features", "labels", "segmentation")]
+
+    dataset = DataSet.from_paths(*paths, make_missing_datasets=True, storage_options=options)
+    np.testing.assert_array_equal(dataset.image[:], image)
+    dataset.labels[0, 1, 2] = 4
+    for array in (dataset.image, dataset.labels, dataset.segmentation, *dataset.features.values()):
+        fs = array.store.fs
+        fs = getattr(fs, "sync_fs", fs)  # Zarr wraps synchronous filesystems
+        assert fs.storage_options["cellcanvas_test_option"] == "kept"
+    reopened = DataSet.from_paths(*paths, storage_options=options)
+    assert reopened.labels[0, 1, 2] == 4
+
+
+def test_storage_options_are_ignored_for_local_paths(tmp_path):
+    image = np.ones((1, 2, 3, 4), dtype=np.float32)
+    zarr.save_array(str(tmp_path / "image"), image, zarr_format=3)
+    zarr.save_array(str(tmp_path / "features"), image, zarr_format=3)
+    dataset = DataSet.from_paths(str(tmp_path / "image"), str(tmp_path / "features"), str(tmp_path / "labels"),
+                                 str(tmp_path / "segmentation"), make_missing_datasets=True,
+                                 storage_options={"anon": True})
+    assert dataset.labels.shape == (2, 3, 4)

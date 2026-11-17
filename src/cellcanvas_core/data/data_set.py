@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import dask.array as da
 import zarr
 from zarr import Array
 
-from cellcanvas_core.data._image import open_image
+from cellcanvas_core.data._image import _store_options, open_image
 from cellcanvas_core.data._geometry import SpatialTransform, spatial_transform, validate_alignment
 
 
@@ -21,21 +21,23 @@ def _lazy(value):
     return da.asarray(value)
 
 
-def _open_annotations(path, shape, create, level, expected, grouped=False):
+def _open_annotations(path, shape, create, level, expected, grouped=False, storage_options=None):
+    options = _store_options(path, storage_options)
     try:
-        node = zarr.open(path, mode="r+")
+        node = zarr.open(path, mode="r+", **options)
     except FileNotFoundError:
         if not create:
             raise
         if grouped:
-            node = zarr.open_group(path, mode="a", zarr_format=3)
+            node = zarr.open_group(path, mode="a", zarr_format=3, **options)
         else:
             return zarr.open_array(path, mode="a", shape=shape, dtype="i4", zarr_format=3,
-                                   dimension_names=("z", "y", "x"))
+                                   dimension_names=("z", "y", "x"), **options)
     if isinstance(node, zarr.Group):
         metadata = node.attrs.asdict()
         if "ome" in metadata or "multiscales" in metadata:
-            node, metadata = open_image(path, level=level, axes=("z", "y", "x"), mode="r+")
+            node, metadata = open_image(path, level=level, axes=("z", "y", "x"), mode="r+",
+                                        storage_options=storage_options)
             validate_alignment(metadata, level, expected)
         elif grouped:
             if "labels" in node:
@@ -46,7 +48,8 @@ def _open_annotations(path, shape, create, level, expected, grouped=False):
             else:
                 raise ValueError("Annotation group has no labels array")
         else:
-            node, _ = open_image(path, level=0, axes=("z", "y", "x"), mode="r+")
+            node, _ = open_image(path, level=0, axes=("z", "y", "x"), mode="r+",
+                                 storage_options=storage_options)
     if not isinstance(node, zarr.Array) or node.shape != shape:
         raise ValueError("Annotation spatial shape does not match the image")
     names = getattr(node.metadata, "dimension_names", None)
@@ -124,28 +127,38 @@ class DataSet:
         make_missing_datasets: bool = False,
         feature_axis: int = 0,
         image_level: int = 0,
+        storage_options: Optional[Dict] = None,
     ):
         """Create a DataSet from a set of paths.
+
+        Paths may be fsspec URLs (for example ``s3://bucket/image.zarr``);
+        ``storage_options`` are passed to the filesystem of every URL path,
+        so remote stores can use anonymous access or a named profile.
+        Credentials should come from the environment, not these options.
 
         todo: add ability to create missing labels/segmentations
         """
         # get the image
-        image, image_metadata = open_image(image_path, level=image_level)
+        image, image_metadata = open_image(image_path, level=image_level,
+                                           storage_options=storage_options)
         geometry = spatial_transform(image_metadata, image_level)
 
         # get the features
         if isinstance(features_path, str):
             features_path = [features_path]
-        features = {path: zarr.open_array(path, mode="r") for path in features_path}
+        features = {path: zarr.open_array(path, mode="r", **_store_options(path, storage_options))
+                    for path in features_path}
 
         # get the labels
         labels = _open_annotations(
-            labels_path, image.shape[1:], make_missing_datasets, image_level, geometry
+            labels_path, image.shape[1:], make_missing_datasets, image_level, geometry,
+            storage_options=storage_options,
         )
 
         # get the segmentation
         segmentation = _open_annotations(
-            segmentation_path, image.shape[1:], make_missing_datasets, image_level, geometry
+            segmentation_path, image.shape[1:], make_missing_datasets, image_level, geometry,
+            storage_options=storage_options,
         )
 
         return cls(
